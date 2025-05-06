@@ -9,9 +9,8 @@ import requests
 import streamlit as st
 from PIL import Image as PILImage
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import landscape
 from reportlab.lib.units import inch
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import (
     Image,
     Paragraph,
@@ -30,28 +29,26 @@ st.set_page_config(page_title="Proposal → PDF", layout="wide")
 
 
 def load_dataframe(uploaded_file):
-    name = uploaded_file.name.lower()
-    if name.endswith((".xls", ".xlsx")):
-        return pd.read_excel(uploaded_file)
-    return pd.read_csv(uploaded_file)
+    fn = uploaded_file.name.lower()
+    return pd.read_excel(uploaded_file) if fn.endswith((".xls", ".xlsx")) else pd.read_csv(uploaded_file)
 
 
 def add_strategy_column(df):
     if "Description" not in df.columns:
-        st.error("No 'Description' column found.")
+        st.error("No 'Description' column")
         return df
-    strategies, descriptions = [], []
-    for val in df["Description"].fillna("").astype(str):
-        parts = val.split("\n", 1)
-        strategies.append(parts[0])
-        descriptions.append(parts[1] if len(parts) > 1 else "")
-    df.insert(0, "Strategy", strategies)
-    df["Description"] = descriptions
+    strat, desc = [], []
+    for v in df["Description"].fillna("").astype(str):
+        parts = v.split("\n", 1)
+        strat.append(parts[0])
+        desc.append(parts[1] if len(parts) > 1 else "")
+    df.insert(0, "Strategy", strat)
+    df["Description"] = desc
     return df
 
 
 def replace_est(df):
-    df.columns = [col.replace("Est.", "Estimated") for col in df.columns]
+    df.columns = [c.replace("Est.", "Estimated") for c in df.columns]
     return df.applymap(lambda v: v.replace("Est.", "Estimated") if isinstance(v, str) else v)
 
 
@@ -61,41 +58,34 @@ def calculate_and_insert_totals(df):
     impcol = "Estimated Impressions"
     ccol = "Estimated Conversions"
 
-    # capture last totals
-    item_total_val = (
-        df.loc[df["Description"].str.contains("Total", na=False), icol]
-        .iat[-1]
+    itot = (
+        df.loc[df["Description"].str.contains("Total", na=False), icol].iat[-1]
         if icol in df.columns and df["Description"].str.contains("Total", na=False).any()
         else None
     )
-    imp_val = (
-        df.loc[df["Description"].str.contains("Impressions", na=False), impcol]
-        .iat[-1]
+    impv = (
+        df.loc[df["Description"].str.contains("Impressions", na=False), impcol].iat[-1]
         if impcol in df.columns and df["Description"].str.contains("Impressions", na=False).any()
         else None
     )
 
-    monthly_sum = pd.to_numeric(df.get(mcol, []), errors="coerce").sum()
-    conversions_sum = pd.to_numeric(df.get(ccol, []), errors="coerce").sum()
+    ms = pd.to_numeric(df.get(mcol, []), errors="coerce").sum()
+    cs = pd.to_numeric(df.get(ccol, []), errors="coerce").sum()
 
-    # drop old total/imp/conversion rows
     mask = df["Description"].str.contains("Total|Impressions|Conversions", na=False, case=False)
     df = df.loc[~mask].reset_index(drop=True)
 
-    # build & append new total row
-    total_row = {c: "" for c in df.columns}
-    total_row["Strategy"] = "Total"
-    if mcol in df.columns: total_row[mcol] = monthly_sum
-    if icol in df.columns and item_total_val is not None: total_row[icol] = item_total_val
-    if impcol in df.columns and imp_val is not None: total_row[impcol] = imp_val
-    if ccol in df.columns: total_row[ccol] = conversions_sum
+    row = {c: "" for c in df.columns}
+    row["Strategy"] = "Total"
+    if mcol in row: row[mcol] = ms
+    if icol in row and itot is not None: row[icol] = itot
+    if impcol in row and impv is not None: row[impcol] = impv
+    if ccol in row: row[ccol] = cs
 
-    df = pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
-    return df
+    return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
 
 
 def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
-    # 1) Format dates, blank out NaT/nan
     pdf_df = df.copy()
     for col in pdf_df.columns:
         if "date" in col.lower():
@@ -104,7 +94,6 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
             pdf_df[col] = pdf_df[col].dt.strftime("%m/%d/%Y")
     pdf_df = pdf_df.fillna("")
 
-    # 2) Currency formatting
     for col in ("Monthly Amount", "Item Total"):
         if col in pdf_df.columns:
             pdf_df[col] = (
@@ -113,113 +102,92 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
                 .map(lambda x: f"${x:,.0f}")
             )
 
-    # 3) Build PDF
-    buffer = io.BytesIO()
-    page_size = (17 * inch, 11 * inch)
+    # ← true 11"x17" landscape
+    buf = io.BytesIO()
+    tw, th = 17 * inch, 11 * inch
     doc = SimpleDocTemplate(
-        buffer,
-        pagesize=landscape(page_size),
-        rightMargin=30,
-        leftMargin=30,
-        topMargin=30,
-        bottomMargin=18,
+        buf,
+        pagesize=(tw, th),
+        leftMargin=0.5 * inch,
+        rightMargin=0.5 * inch,
+        topMargin=0.5 * inch,
+        bottomMargin=0.5 * inch,
+    )
+    elems = []
+
+    styles = getSampleStyleSheet()
+    wrap_style = ParagraphStyle(
+        "wrap",
+        parent=styles["BodyText"],
+        fontSize=7,
+        leading=8,
+        alignment=0,
     )
 
-    elems = []
-    styles = getSampleStyleSheet()
-    normal_wrapped = styles["BodyText"]
-    normal_wrapped.fontSize = 8
-    normal_wrapped.leading = 10
-
-    # logo
     resp = requests.get(LOGO_URL)
-    logo_img = PILImage.open(io.BytesIO(resp.content))
+    img = PILImage.open(io.BytesIO(resp.content))
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-    logo_img.save(tmp.name)
-    elems.append(Image(tmp.name, width=200, height=50))
+    img.save(tmp.name)
+    elems.append(Image(tmp.name, width=1.5 * inch, height=0.5 * inch))
     elems.append(Spacer(1, 12))
-
-    # title
     elems.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
     elems.append(Spacer(1, 12))
 
-    # build table data with Paragraphs for long text
     data = [list(pdf_df.columns)]
     for row in pdf_df.itertuples(index=False):
         cells = []
         for col, val in zip(pdf_df.columns, row):
             txt = "" if val is None else str(val)
-            if col in ("Description", "Notes"):
-                cells.append(Paragraph(txt, normal_wrapped))
+            if col in ("Strategy", "Description", "Notes"):
+                cells.append(Paragraph(txt, wrap_style))
             else:
                 cells.append(txt)
         data.append(cells)
 
-    # column widths
-    total_w = doc.width
-    col_widths = []
-    for col in pdf_df.columns:
-        if col == "Description":
-            col_widths.append(total_w * 0.35)
-        elif col == "Strategy":
-            col_widths.append(total_w * 0.10)
-        elif col in ("Term (Months)", "Estimated Conversions"):
-            col_widths.append(total_w * 0.08)
-        elif col in ("Start Date", "End Date"):
-            col_widths.append(total_w * 0.10)
-        elif col in ("Monthly Amount", "Item Total"):
-            col_widths.append(total_w * 0.10)
-        else:  # Notes or any other
-            col_widths.append(total_w * 0.17)
+    widths = [0.08, 0.32, 0.06, 0.08, 0.08, 0.12, 0.12, 0.06, 0.08]
+    col_widths = [doc.width * w for w in widths]
 
     table = Table(data, colWidths=col_widths, repeatRows=1)
-
-    tbl_style = TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("BACKGROUND", (0, len(data) - 1), (-1, len(data) - 1), colors.lightgrey),
-        ("FONTNAME", (0, len(data) - 1), (-1, len(data) - 1), "Helvetica-Bold"),
-    ])
+    tbl_style = TableStyle(
+        [
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.black),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BACKGROUND", (0, len(data) - 1), (-1, len(data) - 1), colors.lightgrey),
+            ("FONTNAME", (0, len(data) - 1), (-1, len(data) - 1), "Helvetica-Bold"),
+        ]
+    )
     table.setStyle(tbl_style)
     elems.append(table)
 
     doc.build(elems)
-    buffer.seek(0)
-    return buffer
+    buf.seek(0)
+    return buf
 
 
 def main():
-    st.title("🔄 Proposal Transformer → PDF")
+    st.title("🔄 Proposal → PDF")
     uploaded = st.file_uploader("Upload Excel or CSV", type=["xls", "xlsx", "csv"])
     if not uploaded:
-        st.info("Please upload a file to begin.")
         return
 
     df = load_dataframe(uploaded)
-    st.markdown("**Data preview:**")
     st.dataframe(df.head())
 
-    default_title = os.path.splitext(uploaded.name)[0]
-    proposal_title = st.text_input("Proposal Title", default_title)
+    default = os.path.splitext(uploaded.name)[0]
+    title = st.text_input("Proposal Title", default)
 
     if st.button("Generate PDF"):
-        with st.spinner("Processing…"):
-            df1 = add_strategy_column(df.copy())
-            df2 = replace_est(df1)
-            df3 = calculate_and_insert_totals(df2)
-            pdf_bytes = make_pdf(df3, proposal_title)
+        with st.spinner("Rendering PDF…"):
+            d1 = add_strategy_column(df.copy())
+            d2 = replace_est(d1)
+            d3 = calculate_and_insert_totals(d2)
+            pdf = make_pdf(d3, title)
 
-        st.success("Done! Download below:")
-        st.download_button(
-            "📥 Download PDF",
-            data=pdf_bytes,
-            file_name=f"{proposal_title}.pdf",
-            mime="application/pdf",
-        )
+        st.download_button("📥 Download PDF", data=pdf, file_name=f"{title}.pdf", mime="application/pdf")
 
 
 if __name__ == "__main__":
