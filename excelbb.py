@@ -143,7 +143,7 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
     elems = []
     styles = getSampleStyleSheet()
 
-    # Header style: now DMSerif
+    # Header style: DMSerif
     header_style = ParagraphStyle(
         "hdr",
         parent=styles["BodyText"],
@@ -152,7 +152,7 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
         leading=9,
         alignment=1,
     )
-    # Body style: now Barlow
+    # Body style: Barlow
     wrap_style = ParagraphStyle(
         "wrap",
         parent=styles["BodyText"],
@@ -199,7 +199,7 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("BACKGROUND", (0, len(data) - 1), (-1, len(data) - 1), colors.lightgrey),
-            ("FONTNAME", (0, len(data) - 1), (-1, len(data) - 1), "Barlow"),
+            ("FONTNAME", (0, len(data) - 1), (-1, len(data) - 1), "DMSerif"),  # total row in DMSerif
         ]
     )
     table.setStyle(tbl_style)
@@ -235,7 +235,6 @@ def main():
             file_name=f"{proposal_title}.pdf",
             mime="application/pdf",
         )
-
 
 if __name__ == "__main__":
     main()
