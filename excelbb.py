@@ -31,14 +31,16 @@ st.set_page_config(page_title="Proposal → PDF", layout="wide")
 
 def load_dataframe(uploaded_file):
     fn = uploaded_file.name.lower()
-    if fn.endswith((".xls", ".xlsx")):
-        return pd.read_excel(uploaded_file)
-    return pd.read_csv(uploaded_file)
+    return (
+        pd.read_excel(uploaded_file)
+        if fn.endswith((".xls", ".xlsx"))
+        else pd.read_csv(uploaded_file)
+    )
 
 
 def add_strategy_column(df):
     if "Description" not in df.columns:
-        st.error("No 'Description' column")
+        st.error("No 'Description' column found.")
         return df
     strat, desc = [], []
     for v in df["Description"].fillna("").astype(str):
@@ -61,48 +63,47 @@ def calculate_and_insert_totals(df):
     impcol = "Estimated Impressions"
     ccol = "Estimated Conversions"
 
-    # Capture original totals from the Strategy column
+    # 1) Capture the original Item Total and Impressions from the legacy footer rows
     itot = None
-    if icol in df.columns:
-        mask_tot = df["Strategy"].astype(str).str.contains("Total", na=False, case=False)
-        if mask_tot.any():
-            itot = df.loc[mask_tot, icol].iat[-1]
+    if icol in df.columns and "Total" in df["Strategy"].values:
+        itot = df.loc[df["Strategy"] == "Total", icol].iat[-1]
 
     impv = None
-    if impcol in df.columns:
-        mask_imp = df["Strategy"].astype(str).str.contains("Impressions", na=False, case=False)
-        if mask_imp.any():
-            impv = df.loc[mask_imp, impcol].iat[-1]
+    # original files sometimes leave an "Est. Conversions" row
+    if impcol in df.columns and "Est. Conversions" in df["Strategy"].values:
+        impv = df.loc[df["Strategy"] == "Est. Conversions", impcol].iat[-1]
 
-    # Sum numeric columns
-    ms = pd.to_numeric(df.get(mcol, []), errors="coerce").sum()
-    cs = pd.to_numeric(df.get(ccol, []), errors="coerce").sum()
+    # 2) Sum the data columns
+    monthly_sum = pd.to_numeric(df.get(mcol, []), errors="coerce").sum()
+    conv_sum = pd.to_numeric(df.get(ccol, []), errors="coerce").sum()
 
-    # Drop any old Total/Impressions/Conversions rows in either Strategy or Description
-    drop_re = r"Total|Impressions|Conversions"
-    mask = (
-        df["Strategy"].astype(str).str.contains(drop_re, na=False, case=False)
-        | df["Description"].astype(str).str.contains(drop_re, na=False, case=False)
-    )
-    df = df.loc[~mask].reset_index(drop=True)
+    # 3) Drop ONLY the true footer/header leftovers by exact match on Strategy
+    drop_exact = {
+        "Total",
+        "Est. Conversions",
+        "Estimated Conversions",
+        "Est. Impressions",
+        "Estimated Impressions",
+    }
+    df_clean = df.loc[~df["Strategy"].isin(drop_exact)].reset_index(drop=True)
 
-    # Build new Total row
-    total_row = {c: "" for c in df.columns}
+    # 4) Build the new Total row
+    total_row = {c: "" for c in df_clean.columns}
     total_row["Strategy"] = "Total"
     if mcol in total_row:
-        total_row[mcol] = ms
+        total_row[mcol] = monthly_sum
     if icol in total_row and itot is not None:
         total_row[icol] = itot
     if impcol in total_row and impv is not None:
         total_row[impcol] = impv
     if ccol in total_row:
-        total_row[ccol] = cs
+        total_row[ccol] = conv_sum
 
-    return pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
+    return pd.concat([df_clean, pd.DataFrame([total_row])], ignore_index=True)
 
 
 def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
-    # Format dates and blank out NaT/nan
+    # Format dates & blank out NaT/nan
     pdf_df = df.copy()
     for col in pdf_df.columns:
         if "date" in col.lower():
@@ -111,7 +112,7 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
             pdf_df[col] = pdf_df[col].dt.strftime("%m/%d/%Y")
     pdf_df = pdf_df.fillna("")
 
-    # Currency formatting
+    # Format currency
     for col in ("Monthly Amount", "Item Total"):
         if col in pdf_df.columns:
             pdf_df[col] = (
@@ -120,7 +121,7 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
                 .map(lambda x: f"${x:,.0f}")
             )
 
-    # Setup true 11"x17" landscape
+    # True 11"x17" landscape
     buf = io.BytesIO()
     tw, th = 17 * inch, 11 * inch
     doc = SimpleDocTemplate(
@@ -143,7 +144,6 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
         alignment=1,  # center
         fontName="Helvetica-Bold",
     )
-
     wrap_style = ParagraphStyle(
         "wrap",
         parent=styles["BodyText"],
@@ -152,43 +152,45 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
         alignment=0,  # left
     )
 
-    # Logo + title
+    # Logo + Title
     resp = requests.get(LOGO_URL)
-    img = PILImage.open(io.BytesIO(resp.content))
+    logo_img = PILImage.open(io.BytesIO(resp.content))
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-    img.save(tmp.name)
+    logo_img.save(tmp.name)
     elems.append(Image(tmp.name, width=1.5 * inch, height=0.5 * inch))
     elems.append(Spacer(1, 12))
     elems.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
     elems.append(Spacer(1, 12))
 
-    # Build table data
+    # Build table
     header_cells = [Paragraph(col, header_style) for col in pdf_df.columns]
     data = [header_cells]
     for row in pdf_df.itertuples(index=False):
-        cells = []
+        row_cells = []
         for col, val in zip(pdf_df.columns, row):
             txt = "" if val is None else str(val)
             if col in ("Strategy", "Description", "Notes"):
-                cells.append(Paragraph(txt, wrap_style))
+                row_cells.append(Paragraph(txt, wrap_style))
             else:
-                cells.append(txt)
-        data.append(cells)
+                row_cells.append(txt)
+        data.append(row_cells)
 
-    # Column widths
+    # Column widths (proportional)
     widths = [0.08, 0.30, 0.06, 0.08, 0.08, 0.12, 0.12, 0.06, 0.10]
     col_widths = [doc.width * w for w in widths]
 
     table = Table(data, colWidths=col_widths, repeatRows=1)
-    tbl_style = TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.black),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-        ("FONTSIZE", (0, 0), (-1, -1), 7),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("BACKGROUND", (0, len(data)-1), (-1, len(data)-1), colors.lightgrey),
-        ("FONTNAME", (0, len(data)-1), (-1, len(data)-1), "Helvetica-Bold"),
-    ])
+    tbl_style = TableStyle(
+        [
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.black),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BACKGROUND", (0, len(data) - 1), (-1, len(data) - 1), colors.lightgrey),
+            ("FONTNAME", (0, len(data) - 1), (-1, len(data) - 1), "Helvetica-Bold"),
+        ]
+    )
     table.setStyle(tbl_style)
     elems.append(table)
 
@@ -207,19 +209,19 @@ def main():
     st.dataframe(df.head())
 
     default = os.path.splitext(uploaded.name)[0]
-    title = st.text_input("Proposal Title", default)
+    proposal_title = st.text_input("Proposal Title", default)
 
     if st.button("Generate PDF"):
         with st.spinner("Rendering PDF…"):
-            d1 = add_strategy_column(df.copy())
-            d2 = replace_est(d1)
-            d3 = calculate_and_insert_totals(d2)
-            pdf = make_pdf(d3, title)
+            df1 = add_strategy_column(df.copy())
+            df2 = replace_est(df1)
+            df3 = calculate_and_insert_totals(df2)
+            pdf_bytes = make_pdf(df3, proposal_title)
 
         st.download_button(
             "📥 Download PDF",
-            data=pdf,
-            file_name=f"{title}.pdf",
+            data=pdf_bytes,
+            file_name=f"{proposal_title}.pdf",
             mime="application/pdf",
         )
 
