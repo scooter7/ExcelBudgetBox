@@ -9,12 +9,18 @@ import requests
 import streamlit as st
 from PIL import Image as PILImage
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import landscape, letter
+from reportlab.lib.pagesizes import landscape, ledger
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import (Image, Paragraph, SimpleDocTemplate,
-                                Spacer, Table, TableStyle)
+from reportlab.platypus import (
+    Image,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
-# URL of the Carnegie logo
+# Carnegie logo URL
 LOGO_URL = "https://www.carnegiehighered.com/wp-content/uploads/2021/11/Twitter-Image-2-2021.png"
 
 st.set_page_config(page_title="Proposal → PDF", layout="wide")
@@ -64,13 +70,14 @@ def calculate_and_insert_totals(df):
         if mask.any():
             imp_val = df.loc[mask, impcol].iat[-1]
 
-    # Sum numeric columns
-    monthly_sum = pd.to_numeric(df.get(mcol, pd.Series()), errors="coerce").sum()
-    conversions_sum = pd.to_numeric(df.get(ccol, pd.Series()), errors="coerce").sum()
+    # Compute sums
+    monthly_sum = pd.to_numeric(df.get(mcol, []), errors="coerce").sum()
+    conversions_sum = pd.to_numeric(df.get(ccol, []), errors="coerce").sum()
 
     # Drop old Total/Impressions/Conversions rows
     drop_mask = (
-        df["Description"].str.contains("Total|Impressions|Conversions", na=False, case=False)
+        df["Description"]
+          .str.contains("Total|Impressions|Conversions", na=False, case=False)
     )
     df = df.loc[~drop_mask].reset_index(drop=True)
 
@@ -82,80 +89,53 @@ def calculate_and_insert_totals(df):
     if impcol in df.columns and imp_val is not None: total_row[impcol] = imp_val
     if ccol in df.columns: total_row[ccol] = conversions_sum
 
-    # Append via concat (instead of deprecated DataFrame.append)
+    # Append via concat (avoids deprecated .append)
     total_df = pd.DataFrame([total_row])
     df = pd.concat([df, total_df], ignore_index=True)
     return df
 
 def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
+    # 1) Prepare df: parse & format dates, then blank out NaN/NaT
+    pdf_df = df.copy()
+    for col in pdf_df.columns:
+        if "date" in col.lower():
+            pdf_df[col] = pd.to_datetime(pdf_df[col], errors="coerce")
+        if pd.api.types.is_datetime64_any_dtype(pdf_df[col]):
+            pdf_df[col] = pdf_df[col].dt.strftime("%m/%d/%Y")
+    pdf_df = pdf_df.fillna("")
+
+    # 2) Build the PDF
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
-        pagesize=landscape(letter),
-        rightMargin=30,
-        leftMargin=30,
-        topMargin=30,
-        bottomMargin=18
+        pagesize=landscape(ledger),
+        rightMargin=30, leftMargin=30,
+        topMargin=30, bottomMargin=18,
     )
     elems = []
 
-    # Carnegie logo
+    # Logo
     resp = requests.get(LOGO_URL)
     logo_img = PILImage.open(io.BytesIO(resp.content))
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
     logo_img.save(tmp.name)
     elems.append(Image(tmp.name, width=200, height=50))
+    elems.append(Spacer(1, 12))
 
     # Title
     styles = getSampleStyleSheet()
-    elems.append(Spacer(1, 12))
     elems.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
     elems.append(Spacer(1, 12))
 
     # Table
-    data = [list(df.columns)] + df.astype(str).values.tolist()
-    table = Table(data, repeatRows=1)
+    data = [list(pdf_df.columns)] + pdf_df.astype(str).values.tolist()
+    col_count = len(pdf_df.columns)
+    table = Table(
+        data,
+        colWidths=[doc.width / col_count] * col_count,
+        repeatRows=1
+    )
     n = len(data)
     style = TableStyle([
         ("GRID", (0,0), (-1,-1), 0.5, colors.black),
-        ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("ALIGN", (0,0), (-1,-1), "CENTER"),
-        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-        ("BACKGROUND", (0,n-1), (-1,n-1), colors.lightgrey),
-        ("FONTNAME", (0,n-1), (-1,n-1), "Helvetica-Bold"),
-    ])
-    table.setStyle(style)
-    elems.append(table)
-
-    doc.build(elems)
-    buffer.seek(0)
-    return buffer
-
-def main():
-    st.title("🔄 Proposal Transformer → PDF")
-    uploaded = st.file_uploader("Upload Excel or CSV", type=["xls","xlsx","csv"])
-    if not uploaded:
-        return
-
-    df = load_dataframe(uploaded)
-    st.dataframe(df.head())
-
-    proposal_title = st.text_input("Proposal Title", os.path.splitext(uploaded.name)[0])
-
-    if st.button("Generate PDF"):
-        with st.spinner("Processing…"):
-            df1 = add_strategy_column(df.copy())
-            df2 = replace_est(df1)
-            df3 = calculate_and_insert_totals(df2)
-            pdf_bytes = make_pdf(df3, proposal_title)
-
-        st.download_button(
-            "📥 Download PDF",
-            data=pdf_bytes,
-            file_name=f"{proposal_title}.pdf",
-            mime="application/pdf"
-        )
-
-if __name__ == "__main__":
-    main()
+        ("
