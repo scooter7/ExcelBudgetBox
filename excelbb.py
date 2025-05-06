@@ -31,11 +31,9 @@ st.set_page_config(page_title="Proposal → PDF", layout="wide")
 
 def load_dataframe(uploaded_file):
     fn = uploaded_file.name.lower()
-    return (
-        pd.read_excel(uploaded_file)
-        if fn.endswith((".xls", ".xlsx"))
-        else pd.read_csv(uploaded_file)
-    )
+    if fn.endswith((".xls", ".xlsx")):
+        return pd.read_excel(uploaded_file)
+    return pd.read_csv(uploaded_file)
 
 
 def add_strategy_column(df):
@@ -63,44 +61,48 @@ def calculate_and_insert_totals(df):
     impcol = "Estimated Impressions"
     ccol = "Estimated Conversions"
 
-    # capture existing values
-    itot = (
-        df.loc[df["Description"].str.contains("Total", case=False, na=False), icol]
-        .iat[-1]
-        if icol in df.columns and df["Description"].str.contains("Total", na=False, case=False).any()
-        else None
-    )
-    impv = (
-        df.loc[df["Description"].str.contains("Impressions", na=False), impcol]
-        .iat[-1]
-        if impcol in df.columns and df["Description"].str.contains("Impressions", na=False).any()
-        else None
-    )
+    # Capture original totals from the Strategy column
+    itot = None
+    if icol in df.columns:
+        mask_tot = df["Strategy"].astype(str).str.contains("Total", na=False, case=False)
+        if mask_tot.any():
+            itot = df.loc[mask_tot, icol].iat[-1]
 
+    impv = None
+    if impcol in df.columns:
+        mask_imp = df["Strategy"].astype(str).str.contains("Impressions", na=False, case=False)
+        if mask_imp.any():
+            impv = df.loc[mask_imp, impcol].iat[-1]
+
+    # Sum numeric columns
     ms = pd.to_numeric(df.get(mcol, []), errors="coerce").sum()
     cs = pd.to_numeric(df.get(ccol, []), errors="coerce").sum()
 
-    # drop any row where Strategy or Description mentions Total, Impressions, or Conversions
+    # Drop any old Total/Impressions/Conversions rows in either Strategy or Description
     drop_re = r"Total|Impressions|Conversions"
     mask = (
-        df["Strategy"].str.contains(drop_re, case=False, na=False)
-        | df["Description"].str.contains(drop_re, case=False, na=False)
+        df["Strategy"].astype(str).str.contains(drop_re, na=False, case=False)
+        | df["Description"].astype(str).str.contains(drop_re, na=False, case=False)
     )
     df = df.loc[~mask].reset_index(drop=True)
 
-    # build new total row
-    row = {c: "" for c in df.columns}
-    row["Strategy"] = "Total"
-    if mcol in row: row[mcol] = ms
-    if icol in row and itot is not None: row[icol] = itot
-    if impcol in row and impv is not None: row[impcol] = impv
-    if ccol in row: row[ccol] = cs
+    # Build new Total row
+    total_row = {c: "" for c in df.columns}
+    total_row["Strategy"] = "Total"
+    if mcol in total_row:
+        total_row[mcol] = ms
+    if icol in total_row and itot is not None:
+        total_row[icol] = itot
+    if impcol in total_row and impv is not None:
+        total_row[impcol] = impv
+    if ccol in total_row:
+        total_row[ccol] = cs
 
-    return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    return pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
 
 
 def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
-    # format dates
+    # Format dates and blank out NaT/nan
     pdf_df = df.copy()
     for col in pdf_df.columns:
         if "date" in col.lower():
@@ -109,7 +111,7 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
             pdf_df[col] = pdf_df[col].dt.strftime("%m/%d/%Y")
     pdf_df = pdf_df.fillna("")
 
-    # currency formatting
+    # Currency formatting
     for col in ("Monthly Amount", "Item Total"):
         if col in pdf_df.columns:
             pdf_df[col] = (
@@ -118,7 +120,7 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
                 .map(lambda x: f"${x:,.0f}")
             )
 
-    # set up true 11"x17" landscape
+    # Setup true 11"x17" landscape
     buf = io.BytesIO()
     tw, th = 17 * inch, 11 * inch
     doc = SimpleDocTemplate(
@@ -133,28 +135,24 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
     elems = []
     styles = getSampleStyleSheet()
 
-    # header style (for wrapping column names)
     header_style = ParagraphStyle(
         "hdr",
         parent=styles["BodyText"],
         fontSize=8,
         leading=9,
-        alignment=1,        # center
-        spaceAfter=4,
-        spaceBefore=4,
-        fontName="Helvetica-Bold"
+        alignment=1,  # center
+        fontName="Helvetica-Bold",
     )
 
-    # body wrap style
     wrap_style = ParagraphStyle(
         "wrap",
         parent=styles["BodyText"],
         fontSize=7,
         leading=8,
-        alignment=0,        # left
+        alignment=0,  # left
     )
 
-    # logo + title
+    # Logo + title
     resp = requests.get(LOGO_URL)
     img = PILImage.open(io.BytesIO(resp.content))
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
@@ -164,23 +162,20 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
     elems.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
     elems.append(Spacer(1, 12))
 
-    # build table data
-    # 1) header row as Paragraphs
+    # Build table data
     header_cells = [Paragraph(col, header_style) for col in pdf_df.columns]
     data = [header_cells]
-
-    # 2) body rows
     for row in pdf_df.itertuples(index=False):
         cells = []
         for col, val in zip(pdf_df.columns, row):
-            text = "" if val is None else str(val)
+            txt = "" if val is None else str(val)
             if col in ("Strategy", "Description", "Notes"):
-                cells.append(Paragraph(text, wrap_style))
+                cells.append(Paragraph(txt, wrap_style))
             else:
-                cells.append(text)
+                cells.append(txt)
         data.append(cells)
 
-    # column widths summing to doc.width
+    # Column widths
     widths = [0.08, 0.30, 0.06, 0.08, 0.08, 0.12, 0.12, 0.06, 0.10]
     col_widths = [doc.width * w for w in widths]
 
@@ -222,7 +217,10 @@ def main():
             pdf = make_pdf(d3, title)
 
         st.download_button(
-            "📥 Download PDF", data=pdf, file_name=f"{title}.pdf", mime="application/pdf"
+            "📥 Download PDF",
+            data=pdf,
+            file_name=f"{title}.pdf",
+            mime="application/pdf",
         )
 
 
