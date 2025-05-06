@@ -20,11 +20,30 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 LOGO_URL = (
     "https://www.carnegiehighered.com/wp-content/uploads/2021/11/"
     "Twitter-Image-2-2021.png"
 )
+
+# Raw URLs for the fonts
+FONTS = {
+    "Barlow": "https://raw.githubusercontent.com/scooter7/ExcelBudgetBox/main/fonts/Barlow-Regular.ttf",
+    "DMSerif": "https://raw.githubusercontent.com/scooter7/ExcelBudgetBox/main/fonts/DMSerifDisplay-Regular.ttf",
+}
+
+def register_fonts():
+    for name, url in FONTS.items():
+        r = requests.get(url)
+        path = tempfile.NamedTemporaryFile(delete=False, suffix=".ttf").name
+        with open(path, "wb") as f:
+            f.write(r.content)
+        pdfmetrics.registerFont(TTFont(name, path))
+
+# Register at module load
+register_fonts()
 
 st.set_page_config(page_title="Proposal → PDF", layout="wide")
 
@@ -63,21 +82,19 @@ def calculate_and_insert_totals(df):
     impcol = "Estimated Impressions"
     ccol = "Estimated Conversions"
 
-    # 1) Capture the original Item Total and Impressions from the legacy footer rows
+    # Capture original footer values from Strategy
     itot = None
     if icol in df.columns and "Total" in df["Strategy"].values:
         itot = df.loc[df["Strategy"] == "Total", icol].iat[-1]
-
     impv = None
-    # original files sometimes leave an "Est. Conversions" row
     if impcol in df.columns and "Est. Conversions" in df["Strategy"].values:
         impv = df.loc[df["Strategy"] == "Est. Conversions", impcol].iat[-1]
 
-    # 2) Sum the data columns
+    # Sum columns
     monthly_sum = pd.to_numeric(df.get(mcol, []), errors="coerce").sum()
     conv_sum = pd.to_numeric(df.get(ccol, []), errors="coerce").sum()
 
-    # 3) Drop ONLY the true footer/header leftovers by exact match on Strategy
+    # Drop only exact footer rows
     drop_exact = {
         "Total",
         "Est. Conversions",
@@ -87,23 +104,21 @@ def calculate_and_insert_totals(df):
     }
     df_clean = df.loc[~df["Strategy"].isin(drop_exact)].reset_index(drop=True)
 
-    # 4) Build the new Total row
+    # Build and append new Total row
     total_row = {c: "" for c in df_clean.columns}
     total_row["Strategy"] = "Total"
-    if mcol in total_row:
-        total_row[mcol] = monthly_sum
+    total_row[mcol] = monthly_sum if mcol in total_row else ""
     if icol in total_row and itot is not None:
         total_row[icol] = itot
     if impcol in total_row and impv is not None:
         total_row[impcol] = impv
-    if ccol in total_row:
-        total_row[ccol] = conv_sum
+    total_row[ccol] = conv_sum if ccol in total_row else ""
 
     return pd.concat([df_clean, pd.DataFrame([total_row])], ignore_index=True)
 
 
 def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
-    # Format dates & blank out NaT/nan
+    # Format dates
     pdf_df = df.copy()
     for col in pdf_df.columns:
         if "date" in col.lower():
@@ -112,7 +127,7 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
             pdf_df[col] = pdf_df[col].dt.strftime("%m/%d/%Y")
     pdf_df = pdf_df.fillna("")
 
-    # Format currency
+    # Currency
     for col in ("Monthly Amount", "Item Total"):
         if col in pdf_df.columns:
             pdf_df[col] = (
@@ -136,61 +151,70 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
     elems = []
     styles = getSampleStyleSheet()
 
+    # Header style: Barlow
     header_style = ParagraphStyle(
         "hdr",
         parent=styles["BodyText"],
+        fontName="Barlow",
         fontSize=8,
         leading=9,
         alignment=1,  # center
-        fontName="Helvetica-Bold",
     )
+    # Body style: DMSerif
     wrap_style = ParagraphStyle(
         "wrap",
         parent=styles["BodyText"],
+        fontName="DMSerif",
         fontSize=7,
         leading=8,
         alignment=0,  # left
     )
 
-    # Logo + Title
+    # Logo ×3
     resp = requests.get(LOGO_URL)
     logo_img = PILImage.open(io.BytesIO(resp.content))
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
     logo_img.save(tmp.name)
-    elems.append(Image(tmp.name, width=1.5 * inch, height=0.5 * inch))
+    elems.append(Image(tmp.name, width=4.5 * inch, height=1.5 * inch))
     elems.append(Spacer(1, 12))
+
+    # Title
     elems.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
     elems.append(Spacer(1, 12))
 
-    # Build table
+    # Build table data
     header_cells = [Paragraph(col, header_style) for col in pdf_df.columns]
     data = [header_cells]
     for row in pdf_df.itertuples(index=False):
-        row_cells = []
+        cells = []
         for col, val in zip(pdf_df.columns, row):
             txt = "" if val is None else str(val)
             if col in ("Strategy", "Description", "Notes"):
-                row_cells.append(Paragraph(txt, wrap_style))
+                cells.append(Paragraph(txt, wrap_style))
             else:
-                row_cells.append(txt)
-        data.append(row_cells)
+                cells.append(txt)
+        data.append(cells)
 
-    # Column widths (proportional)
+    # Proportional widths
     widths = [0.08, 0.30, 0.06, 0.08, 0.08, 0.12, 0.12, 0.06, 0.10]
     col_widths = [doc.width * w for w in widths]
 
-    table = Table(data, colWidths=col_widths, repeatRows=1)
+    # Table style uses DMSerif for body via FONTNAME
     tbl_style = TableStyle(
         [
             ("GRID", (0, 0), (-1, -1), 0.4, colors.black),
             ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+            ("FONTNAME", (0, 0), (-1, 0), "Barlow"),        # header
+            ("FONTNAME", (0, 1), (-1, -1), "DMSerif"),     # body & footer
             ("FONTSIZE", (0, 0), (-1, -1), 7),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("BACKGROUND", (0, len(data) - 1), (-1, len(data) - 1), colors.lightgrey),
-            ("FONTNAME", (0, len(data) - 1), (-1, len(data) - 1), "Helvetica-Bold"),
+            ("FONTNAME", (0, len(data) - 1), (-1, len(data) - 1), "DMSerif"),
         ]
     )
+
+    table = Table(data, colWidths=col_widths, repeatRows=1)
     table.setStyle(tbl_style)
     elems.append(table)
 
@@ -208,8 +232,8 @@ def main():
     df = load_dataframe(uploaded)
     st.dataframe(df.head())
 
-    default = os.path.splitext(uploaded.name)[0]
-    proposal_title = st.text_input("Proposal Title", default)
+    default_title = os.path.splitext(uploaded.name)[0]
+    proposal_title = st.text_input("Proposal Title", default_title)
 
     if st.button("Generate PDF"):
         with st.spinner("Rendering PDF…"):
