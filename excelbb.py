@@ -21,8 +21,10 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-# Carnegie logo URL
-LOGO_URL = "https://www.carnegiehighered.com/wp-content/uploads/2021/11/Twitter-Image-2-2021.png"
+LOGO_URL = (
+    "https://www.carnegiehighered.com/wp-content/uploads/2021/11/"
+    "Twitter-Image-2-2021.png"
+)
 
 st.set_page_config(page_title="Proposal → PDF", layout="wide")
 
@@ -38,7 +40,6 @@ def add_strategy_column(df):
     if "Description" not in df.columns:
         st.error("No 'Description' column found.")
         return df
-
     strategies, descriptions = [], []
     for val in df["Description"].fillna("").astype(str):
         parts = val.split("\n", 1)
@@ -55,54 +56,46 @@ def replace_est(df):
 
 
 def calculate_and_insert_totals(df):
-    # Column names
     mcol = "Monthly Amount"
     icol = "Item Total"
     impcol = "Estimated Impressions"
     ccol = "Estimated Conversions"
 
-    # Capture existing totals
-    item_total_val = None
-    if icol in df.columns:
-        mask_tot = df["Description"].str.contains("Total", na=False, case=False)
-        if mask_tot.any():
-            item_total_val = df.loc[mask_tot, icol].iat[-1]
+    # capture last totals
+    item_total_val = (
+        df.loc[df["Description"].str.contains("Total", na=False), icol]
+        .iat[-1]
+        if icol in df.columns and df["Description"].str.contains("Total", na=False).any()
+        else None
+    )
+    imp_val = (
+        df.loc[df["Description"].str.contains("Impressions", na=False), impcol]
+        .iat[-1]
+        if impcol in df.columns and df["Description"].str.contains("Impressions", na=False).any()
+        else None
+    )
 
-    imp_val = None
-    if impcol in df.columns:
-        mask_imp = df["Description"].str.contains("Impressions", na=False)
-        if mask_imp.any():
-            imp_val = df.loc[mask_imp, impcol].iat[-1]
-
-    # Compute sums
     monthly_sum = pd.to_numeric(df.get(mcol, []), errors="coerce").sum()
     conversions_sum = pd.to_numeric(df.get(ccol, []), errors="coerce").sum()
 
-    # Drop old Total/Impressions/Conversions rows
-    drop_mask = df["Description"].str.contains(
-        "Total|Impressions|Conversions", na=False, case=False
-    )
-    df = df.loc[~drop_mask].reset_index(drop=True)
+    # drop old total/imp/conversion rows
+    mask = df["Description"].str.contains("Total|Impressions|Conversions", na=False, case=False)
+    df = df.loc[~mask].reset_index(drop=True)
 
-    # Build total row
+    # build & append new total row
     total_row = {c: "" for c in df.columns}
     total_row["Strategy"] = "Total"
-    if mcol in df.columns:
-        total_row[mcol] = monthly_sum
-    if icol in df.columns and item_total_val is not None:
-        total_row[icol] = item_total_val
-    if impcol in df.columns and imp_val is not None:
-        total_row[impcol] = imp_val
-    if ccol in df.columns:
-        total_row[ccol] = conversions_sum
+    if mcol in df.columns: total_row[mcol] = monthly_sum
+    if icol in df.columns and item_total_val is not None: total_row[icol] = item_total_val
+    if impcol in df.columns and imp_val is not None: total_row[impcol] = imp_val
+    if ccol in df.columns: total_row[ccol] = conversions_sum
 
-    total_df = pd.DataFrame([total_row])
-    df = pd.concat([df, total_df], ignore_index=True)
+    df = pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
     return df
 
 
 def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
-    # 1) Format dates and blank out NaT/nan
+    # 1) Format dates, blank out NaT/nan
     pdf_df = df.copy()
     for col in pdf_df.columns:
         if "date" in col.lower():
@@ -111,12 +104,21 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
             pdf_df[col] = pdf_df[col].dt.strftime("%m/%d/%Y")
     pdf_df = pdf_df.fillna("")
 
-    # 2) Build the PDF on 11"x17" landscape
+    # 2) Currency formatting
+    for col in ("Monthly Amount", "Item Total"):
+        if col in pdf_df.columns:
+            pdf_df[col] = (
+                pd.to_numeric(pdf_df[col], errors="coerce")
+                .fillna(0)
+                .map(lambda x: f"${x:,.0f}")
+            )
+
+    # 3) Build PDF
     buffer = io.BytesIO()
     page_size = (17 * inch, 11 * inch)
     doc = SimpleDocTemplate(
         buffer,
-        pagesize=page_size,
+        pagesize=landscape(page_size),
         rightMargin=30,
         leftMargin=30,
         topMargin=30,
@@ -124,8 +126,12 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
     )
 
     elems = []
+    styles = getSampleStyleSheet()
+    normal_wrapped = styles["BodyText"]
+    normal_wrapped.fontSize = 8
+    normal_wrapped.leading = 10
 
-    # Logo
+    # logo
     resp = requests.get(LOGO_URL)
     logo_img = PILImage.open(io.BytesIO(resp.content))
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
@@ -133,24 +139,46 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
     elems.append(Image(tmp.name, width=200, height=50))
     elems.append(Spacer(1, 12))
 
-    # Title
-    styles = getSampleStyleSheet()
+    # title
     elems.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
     elems.append(Spacer(1, 12))
 
-    # Table
-    data = [list(pdf_df.columns)] + pdf_df.astype(str).values.tolist()
-    col_count = len(pdf_df.columns)
-    table = Table(
-        data,
-        colWidths=[doc.width / col_count] * col_count,
-        repeatRows=1,
-    )
+    # build table data with Paragraphs for long text
+    data = [list(pdf_df.columns)]
+    for row in pdf_df.itertuples(index=False):
+        cells = []
+        for col, val in zip(pdf_df.columns, row):
+            txt = "" if val is None else str(val)
+            if col in ("Description", "Notes"):
+                cells.append(Paragraph(txt, normal_wrapped))
+            else:
+                cells.append(txt)
+        data.append(cells)
+
+    # column widths
+    total_w = doc.width
+    col_widths = []
+    for col in pdf_df.columns:
+        if col == "Description":
+            col_widths.append(total_w * 0.35)
+        elif col == "Strategy":
+            col_widths.append(total_w * 0.10)
+        elif col in ("Term (Months)", "Estimated Conversions"):
+            col_widths.append(total_w * 0.08)
+        elif col in ("Start Date", "End Date"):
+            col_widths.append(total_w * 0.10)
+        elif col in ("Monthly Amount", "Item Total"):
+            col_widths.append(total_w * 0.10)
+        else:  # Notes or any other
+            col_widths.append(total_w * 0.17)
+
+    table = Table(data, colWidths=col_widths, repeatRows=1)
 
     tbl_style = TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
         ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("BACKGROUND", (0, len(data) - 1), (-1, len(data) - 1), colors.lightgrey),
