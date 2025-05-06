@@ -42,7 +42,6 @@ def register_fonts():
             f.write(r.content)
         pdfmetrics.registerFont(TTFont(name, path))
 
-# Register at module load
 register_fonts()
 
 st.set_page_config(page_title="Proposal → PDF", layout="wide")
@@ -82,7 +81,6 @@ def calculate_and_insert_totals(df):
     impcol = "Estimated Impressions"
     ccol = "Estimated Conversions"
 
-    # Capture original footer values from Strategy
     itot = None
     if icol in df.columns and "Total" in df["Strategy"].values:
         itot = df.loc[df["Strategy"] == "Total", icol].iat[-1]
@@ -90,11 +88,9 @@ def calculate_and_insert_totals(df):
     if impcol in df.columns and "Est. Conversions" in df["Strategy"].values:
         impv = df.loc[df["Strategy"] == "Est. Conversions", impcol].iat[-1]
 
-    # Sum columns
     monthly_sum = pd.to_numeric(df.get(mcol, []), errors="coerce").sum()
     conv_sum = pd.to_numeric(df.get(ccol, []), errors="coerce").sum()
 
-    # Drop only exact footer rows
     drop_exact = {
         "Total",
         "Est. Conversions",
@@ -104,7 +100,6 @@ def calculate_and_insert_totals(df):
     }
     df_clean = df.loc[~df["Strategy"].isin(drop_exact)].reset_index(drop=True)
 
-    # Build and append new Total row
     total_row = {c: "" for c in df_clean.columns}
     total_row["Strategy"] = "Total"
     total_row[mcol] = monthly_sum if mcol in total_row else ""
@@ -118,7 +113,6 @@ def calculate_and_insert_totals(df):
 
 
 def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
-    # Format dates
     pdf_df = df.copy()
     for col in pdf_df.columns:
         if "date" in col.lower():
@@ -127,7 +121,6 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
             pdf_df[col] = pdf_df[col].dt.strftime("%m/%d/%Y")
     pdf_df = pdf_df.fillna("")
 
-    # Currency
     for col in ("Monthly Amount", "Item Total"):
         if col in pdf_df.columns:
             pdf_df[col] = (
@@ -136,7 +129,6 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
                 .map(lambda x: f"${x:,.0f}")
             )
 
-    # True 11"x17" landscape
     buf = io.BytesIO()
     tw, th = 17 * inch, 11 * inch
     doc = SimpleDocTemplate(
@@ -151,23 +143,23 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
     elems = []
     styles = getSampleStyleSheet()
 
-    # Header style: Barlow
+    # Header style: now DMSerif
     header_style = ParagraphStyle(
         "hdr",
         parent=styles["BodyText"],
-        fontName="Barlow",
+        fontName="DMSerif",
         fontSize=8,
         leading=9,
-        alignment=1,  # center
+        alignment=1,
     )
-    # Body style: DMSerif
+    # Body style: now Barlow
     wrap_style = ParagraphStyle(
         "wrap",
         parent=styles["BodyText"],
-        fontName="DMSerif",
+        fontName="Barlow",
         fontSize=7,
         leading=8,
-        alignment=0,  # left
+        alignment=0,
     )
 
     # Logo ×3
@@ -178,11 +170,9 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
     elems.append(Image(tmp.name, width=4.5 * inch, height=1.5 * inch))
     elems.append(Spacer(1, 12))
 
-    # Title
     elems.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
     elems.append(Spacer(1, 12))
 
-    # Build table data
     header_cells = [Paragraph(col, header_style) for col in pdf_df.columns]
     data = [header_cells]
     for row in pdf_df.itertuples(index=False):
@@ -195,26 +185,23 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
                 cells.append(txt)
         data.append(cells)
 
-    # Proportional widths
     widths = [0.08, 0.30, 0.06, 0.08, 0.08, 0.12, 0.12, 0.06, 0.10]
     col_widths = [doc.width * w for w in widths]
 
-    # Table style uses DMSerif for body via FONTNAME
+    table = Table(data, colWidths=col_widths, repeatRows=1)
     tbl_style = TableStyle(
         [
             ("GRID", (0, 0), (-1, -1), 0.4, colors.black),
             ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-            ("FONTNAME", (0, 0), (-1, 0), "Barlow"),        # header
-            ("FONTNAME", (0, 1), (-1, -1), "DMSerif"),     # body & footer
+            ("FONTNAME", (0, 0), (-1, 0), "DMSerif"),
+            ("FONTNAME", (0, 1), (-1, -1), "Barlow"),
             ("FONTSIZE", (0, 0), (-1, -1), 7),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("BACKGROUND", (0, len(data) - 1), (-1, len(data) - 1), colors.lightgrey),
-            ("FONTNAME", (0, len(data) - 1), (-1, len(data) - 1), "DMSerif"),
+            ("FONTNAME", (0, len(data) - 1), (-1, len(data) - 1), "Barlow"),
         ]
     )
-
-    table = Table(data, colWidths=col_widths, repeatRows=1)
     table.setStyle(tbl_style)
     elems.append(table)
 
