@@ -9,7 +9,8 @@ import requests
 import streamlit as st
 from PIL import Image as PILImage
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import landscape, ledger
+from reportlab.lib.pagesizes import landscape
+from reportlab.lib.units import inch
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import (
     Image,
@@ -21,10 +22,7 @@ from reportlab.platypus import (
 )
 
 # Carnegie logo URL
-LOGO_URL = (
-    "https://www.carnegiehighered.com/wp-content/uploads/2021/11/"
-    "Twitter-Image-2-2021.png"
-)
+LOGO_URL = "https://www.carnegiehighered.com/wp-content/uploads/2021/11/Twitter-Image-2-2021.png"
 
 st.set_page_config(page_title="Proposal → PDF", layout="wide")
 
@@ -104,7 +102,7 @@ def calculate_and_insert_totals(df):
 
 
 def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
-    # 1) Parse & format dates, blank out NaT/nan
+    # 1) Format dates and blank out NaT/nan
     pdf_df = df.copy()
     for col in pdf_df.columns:
         if "date" in col.lower():
@@ -113,30 +111,32 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
             pdf_df[col] = pdf_df[col].dt.strftime("%m/%d/%Y")
     pdf_df = pdf_df.fillna("")
 
-    # 2) Build PDF
+    # 2) Build the PDF on 11"x17" landscape
     buffer = io.BytesIO()
+    page_size = (17 * inch, 11 * inch)
     doc = SimpleDocTemplate(
         buffer,
-        pagesize=landscape(ledger),
+        pagesize=page_size,
         rightMargin=30,
         leftMargin=30,
         topMargin=30,
         bottomMargin=18,
     )
-    elements = []
+
+    elems = []
 
     # Logo
     resp = requests.get(LOGO_URL)
     logo_img = PILImage.open(io.BytesIO(resp.content))
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
     logo_img.save(tmp.name)
-    elements.append(Image(tmp.name, width=200, height=50))
-    elements.append(Spacer(1, 12))
+    elems.append(Image(tmp.name, width=200, height=50))
+    elems.append(Spacer(1, 12))
 
     # Title
     styles = getSampleStyleSheet()
-    elements.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
-    elements.append(Spacer(1, 12))
+    elems.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
+    elems.append(Spacer(1, 12))
 
     # Table
     data = [list(pdf_df.columns)] + pdf_df.astype(str).values.tolist()
@@ -147,22 +147,19 @@ def make_pdf(df: pd.DataFrame, title: str) -> io.BytesIO:
         repeatRows=1,
     )
 
-    # **No unterminated strings here** – every tuple is closed properly
-    tbl_style = TableStyle(
-        [
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("BACKGROUND", (0, len(data) - 1), (-1, len(data) - 1), colors.lightgrey),
-            ("FONTNAME", (0, len(data) - 1), (-1, len(data) - 1), "Helvetica-Bold"),
-        ]
-    )
+    tbl_style = TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BACKGROUND", (0, len(data) - 1), (-1, len(data) - 1), colors.lightgrey),
+        ("FONTNAME", (0, len(data) - 1), (-1, len(data) - 1), "Helvetica-Bold"),
+    ])
     table.setStyle(tbl_style)
-    elements.append(table)
+    elems.append(table)
 
-    doc.build(elements)
+    doc.build(elems)
     buffer.seek(0)
     return buffer
 
