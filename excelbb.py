@@ -33,7 +33,8 @@ FONTS = {
 for name, url in FONTS.items():
     r = requests.get(url)
     path = tempfile.NamedTemporaryFile(delete=False, suffix=".ttf").name
-    open(path, "wb").write(r.content)
+    with open(path, "wb") as f:
+        f.write(r.content)
     pdfmetrics.registerFont(TTFont(name, path))
 
 st.set_page_config(page_title="Proposal → PDF", layout="wide")
@@ -109,6 +110,7 @@ def calculate_and_insert_totals(seg_df):
 
 
 def make_pdf(segments, title):
+    # Build PDF with each table, then a grand total
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf,
@@ -121,71 +123,116 @@ def make_pdf(segments, title):
     bod = ParagraphStyle("bod", parent=styles["BodyText"], fontName="Barlow", fontSize=7, leading=8, alignment=0)
 
     elems = []
-    # Logo
+    # Logo & title
     r = requests.get(LOGO_URL)
-    logo_img = PILImage.open(io.BytesIO(r.content))
+    img = PILImage.open(io.BytesIO(r.content))
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-    logo_img.save(tmp.name)
+    img.save(tmp.name)
     elems.append(Image(tmp.name, width=4.5 * inch, height=1.5 * inch))
     elems.append(Spacer(1, 12))
     elems.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
     elems.append(Spacer(1, 12))
 
+    # Collect grand totals
+    grand = None
+
     for seg in segments:
-        df = seg["df"]
-        df = df[df["Service"].notna() & df["Service"].str.strip().astype(bool)]
-        df = df.loc[
-            ~(
-                (df["Service"].str.strip().str.lower() == "service")
-                & (df.get("Description", "").str.strip().str.lower() == "description")
-            )
+        df = seg["df"].fillna("")  # ensure blanks stay blank
+
+        # drop UI-only rows
+        df = df[
+            df["Service"].notna() & df["Service"].str.strip().astype(bool)
         ].reset_index(drop=True)
 
-        df = calculate_and_insert_totals(df)
+        # recalc & append true totals
+        df = calculate_and_insert_totals(df).fillna("")
 
+        # update grand totals dict
+        tot_row = df.loc[df["Service"] == "Total"].iloc[0]
+        if grand is None:
+            grand = {c: 0 for c in df.columns}
+            grand["Service"] = "Grand Total"
+        # sum numeric columns
+        for c in df.columns:
+            if c not in ("Service", "Description", "Notes"):
+                try:
+                    val = float(str(tot_row[c]).replace("$", "").replace(",", ""))
+                    grand[c] = grand.get(c, 0) + val
+                except:
+                    grand[c] = ""
+
+        # format dates & currency
         for col in df.columns:
             if "date" in col.lower():
-                df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%m/%d/%Y")
+                df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%m/%d/%Y").fillna("")
         for col in ("Monthly Amount", "Item Total"):
             if col in df.columns:
                 df[col] = (
-                    pd.to_numeric(df[col], errors="coerce")
+                    pd.to_numeric(df[col].str.replace("[^0-9.]", "", regex=True), errors="coerce")
                     .fillna(0)
                     .map(lambda x: f"${x:,.0f}")
                 )
 
-        header_cells = [Paragraph(c, hdr) for c in df.columns]
-        data = [header_cells]
+        # table
+        header = [Paragraph(c, hdr) for c in df.columns]
+        data = [header]
         for row in df.itertuples(index=False):
             cells = []
             for c, v in zip(df.columns, row):
-                txt = "" if v is None else str(v)
+                txt = "" if v is None or pd.isna(v) else str(v)
                 if "<a href" in txt or c in ("Service", "Description", "Notes"):
                     cells.append(Paragraph(txt, bod))
                 else:
                     cells.append(txt)
             data.append(cells)
 
-        col_ws = [0.12, 0.30, 0.06, 0.08, 0.08, 0.12, 0.12, 0.06, 0.06]
-        cw = [doc.width * w for w in col_ws]
-        tbl = Table(data, colWidths=cw, repeatRows=1)
+        widths = [0.12, 0.30, 0.06, 0.08, 0.08, 0.12, 0.12, 0.06, 0.06]
+        colw = [doc.width * w for w in widths]
+        tbl = Table(data, colWidths=colw, repeatRows=1)
         tbl.setStyle(
-            TableStyle(
-                [
-                    ("GRID", (0, 0), (-1, -1), 0.4, colors.black),
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                    ("FONTNAME", (0, 0), (-1, 0), "DMSerif"),
-                    ("FONTNAME", (0, 1), (-1, -1), "Barlow"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 7),
-                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    ("BACKGROUND", (0, len(data) - 1), (-1, len(data) - 1), colors.lightgrey),
-                    ("FONTNAME", (0, len(data) - 1), (-1, len(data) - 1), "DMSerif"),
-                ]
-            )
+            TableStyle([
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.black),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ("FONTNAME", (0, 0), (-1, 0), "DMSerif"),
+                ("FONTNAME", (0, 1), (-1, -1), "Barlow"),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("BACKGROUND", (0, len(data) - 1), (-1, len(data) - 1), colors.lightgrey),
+                ("FONTNAME", (0, len(data) - 1), (-1, len(data) - 1), "DMSerif"),
+            ])
         )
         elems.append(tbl)
         elems.append(Spacer(1, 24))
+
+    # Grand Total row
+    if grand:
+        cols = list(grand.keys())
+        # format grand numeric
+        for c in cols:
+            if c not in ("Service", "Description", "Notes"):
+                if isinstance(grand[c], (int, float)):
+                    grand[c] = f"${grand[c]:,.0f}"
+                else:
+                    grand[c] = ""
+        row_cells = []
+        for c in cols:
+            if c == "Service":
+                row_cells.append(Paragraph(grand[c], hdr))
+            else:
+                row_cells.append(grand[c])
+        gt_table = Table([row_cells], colWidths=[doc.width * w for w in widths])
+        gt_table.setStyle(
+            TableStyle([
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.black),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ("FONTNAME", (0, 0), (-1, 0), "DMSerif"),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ])
+        )
+        elems.append(gt_table)
 
     doc.build(elems)
     buf.seek(0)
@@ -206,7 +253,6 @@ def main():
 
     # Inline edit rows & columns per table
     for seg in segments:
-        # remove Estimated Conversions rows
         df_seg = seg["df"].loc[
             ~seg["df"]["Service"].str.strip().str.lower().eq("estimated conversions")
         ].reset_index(drop=True)
@@ -219,7 +265,7 @@ def main():
             key=f"cols_{seg['name']}"
         )
         edited = st.data_editor(
-            df_seg[keep_cols],
+            df_seg[keep_cols].fillna(""),
             num_rows="dynamic",
             use_container_width=True,
             key=f"editor_{seg['name']}"
@@ -238,8 +284,7 @@ def main():
             if link_col in tbl.columns and 0 <= link_row < len(tbl):
                 base = str(tbl.at[link_row, link_col])
                 tbl.at[link_row, link_col] = (
-                    f'{base} – '
-                    f'<font color="blue"><a href="{link_url}">link</a></font>'
+                    f'{base} – <font color="blue"><a href="{link_url}">link</a></font>'
                 )
 
     # Generate PDF
