@@ -166,38 +166,49 @@ def make_pdf(df, title, link_col, link_row, link_url):
 
 def main():
     st.title("🔄 Proposal → PDF")
+
     uploaded = st.file_uploader("Upload Excel/CSV", type=["xls","xlsx","csv"])
-    if not uploaded: 
+    if not uploaded:
         return
 
-    # load & prepare headers
+    # 1) Load & rename A→Service, clean it, rename Est→Estimated
     df = load_and_prepare_dataframe(uploaded)
-
-    # SERVICE cleanup
     df = transform_service_column(df)
-
-    # rename Est→Estimated before drop
     df = replace_est(df)
 
-    # allow drop *now*
-    drop_cols = st.multiselect("Remove columns:", options=df.columns.tolist())
+    # 2) Let the user drop ANY columns
+    drop_cols = st.multiselect("Columns to remove:", options=df.columns.tolist())
     if drop_cols:
         df = df.drop(columns=drop_cols, errors="ignore")
 
+    # 3) Show the cleaned preview
     st.dataframe(df.head())
 
-    # hyperlink inputs
+    # 4) Hyperlink inputs
     link_col = st.selectbox("Hyperlink column:", [""] + df.columns.tolist())
-    link_row = st.number_input("Hyperlink Excel row (1=header):", min_value=1, max_value=len(df)+1, value=2)
+    link_row = st.number_input("Hyperlink Excel row (1=header):",
+                               min_value=1, max_value=len(df)+1, value=2)
     link_url = st.text_input("URL for link:")
 
-    title = st.text_input("Proposal Title", os.path.splitext(uploaded.name)[0])
+    # 5) Proposal title
+    proposal_title = st.text_input("Proposal Title",
+                                   os.path.splitext(uploaded.name)[0])
 
+    # 6) Generate PDF
     if st.button("Generate PDF"):
         with st.spinner("Rendering PDF…"):
-            df2 = calculate_and_insert_totals(df.copy())
-            pdf = make_pdf(df2, title, link_col, link_row, link_url)
-        st.download_button("📥 Download PDF", data=pdf, file_name=f"{title}.pdf", mime="application/pdf")
+            # a) calculate totals on the already-dropped df
+            df_totals = calculate_and_insert_totals(df.copy())
+            # b) (Extra safety) drop cols again on the totals table
+            if drop_cols:
+                df_totals = df_totals.drop(columns=drop_cols, errors="ignore")
+            # c) make the PDF
+            pdf_bytes = make_pdf(df_totals,
+                                 proposal_title,
+                                 link_col, link_row, link_url)
 
-if __name__=="__main__":
-    main()
+        st.download_button("📥 Download PDF",
+                           data=pdf_bytes,
+                           file_name=f"{proposal_title}.pdf",
+                           mime="application/pdf")
+
