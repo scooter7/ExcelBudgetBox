@@ -212,3 +212,5 @@ def main():
                            file_name=f"{proposal_title}.pdf",
                            mime="application/pdf")
 
+if __name__=="__main__":
+    main()
