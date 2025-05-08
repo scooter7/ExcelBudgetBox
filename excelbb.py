@@ -33,7 +33,8 @@ FONTS = {
 for name, url in FONTS.items():
     r = requests.get(url)
     path = tempfile.NamedTemporaryFile(delete=False, suffix=".ttf").name
-    open(path, "wb").write(r.content)
+    with open(path, "wb") as f:
+        f.write(r.content)
     pdfmetrics.registerFont(TTFont(name, path))
 
 st.set_page_config(page_title="Proposal → PDF", layout="wide")
@@ -142,7 +143,7 @@ def make_pdf(segments, title):
         except:
             return ""
 
-    grand_total_amt = 0.0
+    grand_total_item = 0.0
     col_widths = [0.12, 0.30, 0.06, 0.08, 0.08, 0.12, 0.12, 0.06, 0.06]
     colw = [doc.width * w for w in col_widths]
 
@@ -161,12 +162,12 @@ def make_pdf(segments, title):
         # recalc and append real totals
         df = calculate_and_insert_totals(df).fillna("")
 
-        # capture this table's total amount
+        # capture this table's Item Total
         tot_row = df.loc[df["Service"] == "Total"].iloc[0]
-        amt_raw = tot_row.get("Monthly Amount", "")
-        num = re.sub(r"[^\d.]", "", str(amt_raw))
+        item_raw = tot_row.get("Item Total", "")
+        num = re.sub(r"[^\d.]", "", str(item_raw))
         try:
-            grand_total_amt += float(num) if num else 0.0
+            grand_total_item += float(num) if num else 0.0
         except:
             pass
 
@@ -212,33 +213,31 @@ def make_pdf(segments, title):
         elems.append(tbl)
         elems.append(Spacer(1, 24))
 
-    # Grand Total row: only Monthly Amount
-    if grand_total_amt is not None:
-        formatted = fmt_money(grand_total_amt)
-        # build one-row table
-        cols = segments[0]["df"].columns
-        row_cells = []
-        for c in cols:
-            if c == "Service":
-                row_cells.append(Paragraph("Grand Total", hdr))
-            elif c == "Monthly Amount":
-                row_cells.append(formatted)
-            else:
-                row_cells.append("")
-        gt = Table([row_cells], colWidths=colw)
-        gt.setStyle(
-            TableStyle(
-                [
-                    ("GRID", (0, 0), (-1, -1), 0.4, colors.black),
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                    ("FONTNAME", (0, 0), (-1, 0), "DMSerif"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 7),
-                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ]
-            )
+    # Grand Total row: only Item Total
+    formatted = fmt_money(grand_total_item)
+    cols = segments[0]["df"].columns
+    row_cells = []
+    for c in cols:
+        if c == "Service":
+            row_cells.append(Paragraph("Grand Total", hdr))
+        elif c == "Item Total":
+            row_cells.append(formatted)
+        else:
+            row_cells.append("")
+    gt = Table([row_cells], colWidths=colw)
+    gt.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.black),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ("FONTNAME", (0, 0), (-1, 0), "DMSerif"),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]
         )
-        elems.append(gt)
+    )
+    elems.append(gt)
 
     doc.build(elems)
     buf.seek(0)
