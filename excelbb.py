@@ -131,7 +131,7 @@ def make_pdf(segments, title):
     elems.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
     elems.append(Spacer(1, 12))
 
-    # Helper to format money but leave blanks blank
+    # helper to format currency, keeping blanks blank
     def fmt_money(val):
         s = str(val).strip()
         if not s or s.lower() == "nan":
@@ -142,14 +142,14 @@ def make_pdf(segments, title):
         except:
             return ""
 
-    # Track grand totals
-    grand = None
-    net_widths = [0.12, 0.30, 0.06, 0.08, 0.08, 0.12, 0.12, 0.06, 0.06]
+    grand_total_amt = 0.0
+    col_widths = [0.12, 0.30, 0.06, 0.08, 0.08, 0.12, 0.12, 0.06, 0.06]
+    colw = [doc.width * w for w in col_widths]
 
     for seg in segments:
         df = seg["df"].fillna("")
 
-        # drop blanks & repeated header
+        # drop blank & repeated header rows
         df = df[df["Service"].str.strip().astype(bool)].reset_index(drop=True)
         df = df.loc[
             ~(
@@ -158,27 +158,24 @@ def make_pdf(segments, title):
             )
         ].reset_index(drop=True)
 
+        # recalc and append real totals
         df = calculate_and_insert_totals(df).fillna("")
 
-        # accumulate grand totals
-        tot = df.loc[df["Service"] == "Total"].iloc[0]
-        if grand is None:
-            grand = {c: 0 for c in df.columns}
-            grand["Service"] = "Grand Total"
-        for c in df.columns:
-            if c not in ("Service", "Description", "Notes"):
-                try:
-                    num = float(re.sub(r"[^\d.]", "", str(tot[c])))
-                    grand[c] = grand.get(c, 0) + num
-                except:
-                    pass
+        # capture this table's total amount
+        tot_row = df.loc[df["Service"] == "Total"].iloc[0]
+        amt_raw = tot_row.get("Monthly Amount", "")
+        num = re.sub(r"[^\d.]", "", str(amt_raw))
+        try:
+            grand_total_amt += float(num) if num else 0.0
+        except:
+            pass
 
         # format dates
         for col in df.columns:
             if "date" in col.lower():
                 df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%m/%d/%Y").fillna("")
 
-        # format currency
+        # format currency columns
         for col in ("Monthly Amount", "Item Total"):
             if col in df.columns:
                 df[col] = df[col].apply(fmt_money)
@@ -196,10 +193,8 @@ def make_pdf(segments, title):
                     cells.append(txt)
             data.append(cells)
 
-        # render table
-        colw = [doc.width * w for w in net_widths]
-        table = Table(data, colWidths=colw, repeatRows=1)
-        table.setStyle(
+        tbl = Table(data, colWidths=colw, repeatRows=1)
+        tbl.setStyle(
             TableStyle(
                 [
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.black),
@@ -214,20 +209,23 @@ def make_pdf(segments, title):
                 ]
             )
         )
-        elems.append(table)
+        elems.append(tbl)
         elems.append(Spacer(1, 24))
 
-    # Grand Total row
-    if grand:
-        # format grand values
-        grand_row = []
-        for c in df.columns:
+    # Grand Total row: only Monthly Amount
+    if grand_total_amt is not None:
+        formatted = fmt_money(grand_total_amt)
+        # build one-row table
+        cols = segments[0]["df"].columns
+        row_cells = []
+        for c in cols:
             if c == "Service":
-                grand_row.append(Paragraph(grand[c], hdr))
+                row_cells.append(Paragraph("Grand Total", hdr))
+            elif c == "Monthly Amount":
+                row_cells.append(formatted)
             else:
-                val = grand.get(c, "")
-                grand_row.append(fmt_money(val))
-        gt = Table([grand_row], colWidths=[doc.width * w for w in net_widths])
+                row_cells.append("")
+        gt = Table([row_cells], colWidths=colw)
         gt.setStyle(
             TableStyle(
                 [
