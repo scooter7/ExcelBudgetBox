@@ -25,10 +25,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # --- Logo & Fonts ---
-LOGO_URL = (
-    "https://www.carnegiehighered.com/wp-content/uploads/2021/11/"
-    "Twitter-Image-2-2021.png"
-)
+LOGO_URL = "https://www.carnegiehighered.com/wp-content/uploads/2021/11/Twitter-Image-2-2021.png"
 FONTS = {
     "Barlow":  "https://raw.githubusercontent.com/scooter7/ExcelBudgetBox/main/fonts/Barlow-Regular.ttf",
     "DMSerif": "https://raw.githubusercontent.com/scooter7/ExcelBudgetBox/main/fonts/DMSerifDisplay-Regular.ttf",
@@ -163,7 +160,7 @@ def make_pdf(segments, title):
             cells = []
             for c, v in zip(df.columns, row):
                 txt = "" if v is None else str(v)
-                if "<link" in txt or c in ("Service", "Description", "Notes"):
+                if "<a href" in txt or c in ("Service", "Description", "Notes"):
                     cells.append(Paragraph(txt, bod))
                 else:
                     cells.append(txt)
@@ -201,21 +198,20 @@ def main():
     if not uploaded:
         return
 
+    # Load, clean, split
     df = load_and_prepare_dataframe(uploaded)
     df = transform_service_column(df)
     df = replace_est(df)
-
     segments = split_tables(df)
 
-    # Inline row+column editing per table
+    # Inline edit rows & columns per table
     for seg in segments:
-        # never show Estimated Conversions rows
+        # remove Estimated Conversions rows in UI
         df_seg = seg["df"].loc[
             ~seg["df"]["Service"].str.strip().str.lower().eq("estimated conversions")
         ].reset_index(drop=True)
 
-        st.markdown(f"**Edit<table> {seg['name']}**")
-        # choose columns to show/edit
+        st.markdown(f"**Edit table: {seg['name']}**")
         keep_cols = st.multiselect(
             "Columns to show/edit:",
             options=df_seg.columns.tolist(),
@@ -241,9 +237,12 @@ def main():
             tbl = seg["df"]
             if link_col in tbl.columns and 0 <= link_row < len(tbl):
                 base = str(tbl.at[link_row, link_col])
-                tbl.at[link_row, link_col] = f'{base} – <link href="{link_url}">link</link>'
+                tbl.at[link_row, link_col] = (
+                    f'{base} – '
+                    f'<font color="blue"><a href="{link_url}">link</a></font>'
+                )
 
-    # Preview final
+    # Preview
     for seg in segments:
         st.markdown(f"**{seg['name']} (final preview)**")
         st.dataframe(seg["df"], use_container_width=True)
@@ -255,7 +254,8 @@ def main():
             seg["df"] = calculate_and_insert_totals(seg["df"])
         pdf_bytes = make_pdf(segments, title)
         st.download_button(
-            "📥 Download PDF", data=pdf_bytes, file_name=f"{title}.pdf", mime="application/pdf"
+            "📥 Download PDF", data=pdf_bytes,
+            file_name=f"{title}.pdf", mime="application/pdf"
         )
 
 
