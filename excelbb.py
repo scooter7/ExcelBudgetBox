@@ -198,7 +198,7 @@ def main():
     if not uploaded:
         return
 
-    # Load, clean, split
+    # Load & clean
     df = load_and_prepare_dataframe(uploaded)
     df = transform_service_column(df)
     df = replace_est(df)
@@ -206,7 +206,7 @@ def main():
 
     # Inline edit rows & columns per table
     for seg in segments:
-        # remove Estimated Conversions rows in UI
+        # remove Estimated Conversions rows
         df_seg = seg["df"].loc[
             ~seg["df"]["Service"].str.strip().str.lower().eq("estimated conversions")
         ].reset_index(drop=True)
@@ -242,11 +242,6 @@ def main():
                     f'<font color="blue"><a href="{link_url}">link</a></font>'
                 )
 
-    # Preview
-    for seg in segments:
-        st.markdown(f"**{seg['name']} (final preview)**")
-        st.dataframe(seg["df"], use_container_width=True)
-
     # Generate PDF
     title = st.text_input("Proposal Title", os.path.splitext(uploaded.name)[0])
     if st.button("Generate PDF"):
@@ -254,8 +249,7 @@ def main():
             seg["df"] = calculate_and_insert_totals(seg["df"])
         pdf_bytes = make_pdf(segments, title)
         st.download_button(
-            "📥 Download PDF", data=pdf_bytes,
-            file_name=f"{title}.pdf", mime="application/pdf"
+            "📥 Download PDF", data=pdf_bytes, file_name=f"{title}.pdf", mime="application/pdf"
         )
 
 
