@@ -132,7 +132,6 @@ def make_pdf(segments, title):
     elems.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
     elems.append(Spacer(1, 12))
 
-    # helper to format currency, keeping blanks blank
     def fmt_money(val):
         s = str(val).strip()
         if not s or s.lower() == "nan":
@@ -144,13 +143,12 @@ def make_pdf(segments, title):
             return ""
 
     grand_total_item = 0.0
-    col_widths = [0.12, 0.30, 0.06, 0.08, 0.08, 0.12, 0.12, 0.06, 0.06]
-    colw = [doc.width * w for w in col_widths]
+    widths = [0.12, 0.30, 0.06, 0.08, 0.08, 0.12, 0.12, 0.06, 0.06]
+    colw = [doc.width * w for w in widths]
 
     for seg in segments:
         df = seg["df"].fillna("")
 
-        # drop blank & repeated header rows
         df = df[df["Service"].str.strip().astype(bool)].reset_index(drop=True)
         df = df.loc[
             ~(
@@ -159,10 +157,8 @@ def make_pdf(segments, title):
             )
         ].reset_index(drop=True)
 
-        # recalc and append real totals
         df = calculate_and_insert_totals(df).fillna("")
 
-        # capture this table's Item Total
         tot_row = df.loc[df["Service"] == "Total"].iloc[0]
         item_raw = tot_row.get("Item Total", "")
         num = re.sub(r"[^\d.]", "", str(item_raw))
@@ -171,17 +167,14 @@ def make_pdf(segments, title):
         except:
             pass
 
-        # format dates
         for col in df.columns:
             if "date" in col.lower():
                 df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%m/%d/%Y").fillna("")
 
-        # format currency columns
         for col in ("Monthly Amount", "Item Total"):
             if col in df.columns:
                 df[col] = df[col].apply(fmt_money)
 
-        # build table
         header = [Paragraph(c, hdr) for c in df.columns]
         data = [header]
         for row in df.itertuples(index=False):
@@ -194,8 +187,8 @@ def make_pdf(segments, title):
                     cells.append(txt)
             data.append(cells)
 
-        tbl = Table(data, colWidths=colw, repeatRows=1)
-        tbl.setStyle(
+        table = Table(data, colWidths=colw, repeatRows=1)
+        table.setStyle(
             TableStyle(
                 [
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.black),
@@ -210,7 +203,7 @@ def make_pdf(segments, title):
                 ]
             )
         )
-        elems.append(tbl)
+        elems.append(table)
         elems.append(Spacer(1, 24))
 
     # Grand Total row: only Item Total
@@ -250,34 +243,33 @@ def main():
     if not uploaded:
         return
 
-    # Load & clean
     df = load_and_prepare_dataframe(uploaded)
     df = transform_service_column(df)
     df = replace_est(df)
     segments = split_tables(df)
 
-    # Inline edit rows & columns
+    # Inline editing
     for seg in segments:
         df_seg = seg["df"].loc[
             ~seg["df"]["Service"].str.strip().str.lower().eq("estimated conversions")
         ].reset_index(drop=True)
 
         st.markdown(f"**Edit table: {seg['name']}**")
-        keep_cols = st.multiselect(
+        keep = st.multiselect(
             "Columns to show/edit:",
             options=df_seg.columns.tolist(),
             default=df_seg.columns.tolist(),
             key=f"cols_{seg['name']}"
         )
         edited = st.data_editor(
-            df_seg[keep_cols].fillna(""),
+            df_seg[keep].fillna(""),
             num_rows="dynamic",
             use_container_width=True,
             key=f"editor_{seg['name']}"
         )
-        seg["df"] = edited.copy()
+        seg["df"] = edited.reset_index(drop=True)
 
-    # Hyperlinks
+    # Hyperlink edits
     table_names = [s["name"] for s in segments]
     link_tables = st.multiselect("Add hyperlink to which tables?", options=table_names)
     link_col = st.selectbox("Hyperlink column:", options=[""] + df.columns.tolist())
@@ -285,23 +277,21 @@ def main():
     link_url = st.text_input("URL for hyperlink:")
     for seg in segments:
         if seg["name"] in link_tables and link_col and link_url:
-            tbl = seg["df"]
+            tbl = seg["df"].reset_index(drop=True)
             if link_col in tbl.columns and 0 <= link_row < len(tbl):
-                base = str(tbl.at[link_row, link_col])
-                tbl.at[link_row, link_col] = (
+                col_idx = tbl.columns.get_loc(link_col)
+                base = str(tbl.iat[link_row, col_idx])
+                tbl.iat[link_row, col_idx] = (
                     f'{base} – <font color="blue"><a href="{link_url}">link</a></font>'
                 )
+                seg["df"] = tbl
 
-    # Generate PDF
     title = st.text_input("Proposal Title", os.path.splitext(uploaded.name)[0])
     if st.button("Generate PDF"):
         for seg in segments:
             seg["df"] = calculate_and_insert_totals(seg["df"])
-        pdf_bytes = make_pdf(segments, title)
-        st.download_button(
-            "📥 Download PDF", data=pdf_bytes,
-            file_name=f"{title}.pdf", mime="application/pdf"
-        )
+        pdf = make_pdf(segments, title)
+        st.download_button("📥 Download PDF", data=pdf, file_name=f"{title}.pdf", mime="application/pdf")
 
 
 if __name__ == "__main__":
