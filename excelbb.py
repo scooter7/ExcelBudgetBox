@@ -148,7 +148,6 @@ def make_pdf(segments, title):
 
     for seg in segments:
         df = seg["df"].fillna("")
-
         df = df[df["Service"].str.strip().astype(bool)].reset_index(drop=True)
         df = df.loc[
             ~(
@@ -170,7 +169,6 @@ def make_pdf(segments, title):
         for col in df.columns:
             if "date" in col.lower():
                 df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%m/%d/%Y").fillna("")
-
         for col in ("Monthly Amount", "Item Total"):
             if col in df.columns:
                 df[col] = df[col].apply(fmt_money)
@@ -181,14 +179,14 @@ def make_pdf(segments, title):
             cells = []
             for c, v in zip(df.columns, row):
                 txt = "" if v is None or pd.isna(v) else str(v)
-                if "<a href" in txt or c in ("Service", "Description", "Notes"):
+                if "<font" in txt or c in ("Service", "Description", "Notes"):
                     cells.append(Paragraph(txt, bod))
                 else:
                     cells.append(txt)
             data.append(cells)
 
-        table = Table(data, colWidths=colw, repeatRows=1)
-        table.setStyle(
+        tbl = Table(data, colWidths=colw, repeatRows=1)
+        tbl.setStyle(
             TableStyle(
                 [
                     ("GRID", (0, 0), (-1, -1), 0.4, colors.black),
@@ -203,10 +201,10 @@ def make_pdf(segments, title):
                 ]
             )
         )
-        elems.append(table)
+        elems.append(tbl)
         elems.append(Spacer(1, 24))
 
-    # Grand Total row: only Item Total
+    # Grand Total (Item Total only)
     formatted = fmt_money(grand_total_item)
     cols = segments[0]["df"].columns
     row_cells = []
@@ -269,22 +267,48 @@ def main():
         )
         seg["df"] = edited.reset_index(drop=True)
 
-    # Hyperlink edits
+    # Hyperlink specs
     table_names = [s["name"] for s in segments]
-    link_tables = st.multiselect("Add hyperlink to which tables?", options=table_names)
-    link_col = st.selectbox("Hyperlink column:", options=[""] + df.columns.tolist())
-    link_row = st.number_input("Row to hyperlink (0-based):", min_value=0, value=0)
-    link_url = st.text_input("URL for hyperlink:")
+    all_columns = df.columns.tolist()
+    spec_df = pd.DataFrame({
+        "Table": pd.Series(dtype="category"),
+        "Column": pd.Series(dtype="category"),
+        "Row": pd.Series(dtype="int"),
+        "URL": pd.Series(dtype="string")
+    })
     for seg in segments:
-        if seg["name"] in link_tables and link_col and link_url:
-            tbl = seg["df"].reset_index(drop=True)
-            if link_col in tbl.columns and 0 <= link_row < len(tbl):
-                col_idx = tbl.columns.get_loc(link_col)
-                base = str(tbl.iat[link_row, col_idx])
-                tbl.iat[link_row, col_idx] = (
-                    f'{base} – <font color="blue"><a href="{link_url}">link</a></font>'
-                )
-                seg["df"] = tbl
+        spec_df["Table"] = spec_df["Table"].cat.set_categories(table_names)
+    spec_df["Column"] = spec_df["Column"].cat.set_categories(all_columns)
+
+    link_specs = st.data_editor(
+        spec_df,
+        column_config={
+            "Table": st.column_config.SelectboxColumn("Table", options=table_names),
+            "Column": st.column_config.SelectboxColumn("Column", options=all_columns),
+            "Row": st.column_config.NumberColumn("Row", min_value=0, step=1),
+            "URL": st.column_config.TextColumn("URL"),
+        },
+        num_rows="dynamic",
+        use_container_width=True,
+        key="link_specs"
+    )
+
+    # Apply hyperlinks
+    for _, spec in link_specs.dropna(subset=["Table","Column","URL"]).iterrows():
+        tbl_name = spec["Table"]
+        col = spec["Column"]
+        idx = int(spec["Row"])
+        url = spec["URL"]
+        for seg in segments:
+            if seg["name"] == tbl_name:
+                df_tbl = seg["df"].reset_index(drop=True)
+                if col in df_tbl.columns and 0 <= idx < len(df_tbl):
+                    col_idx = df_tbl.columns.get_loc(col)
+                    base = str(df_tbl.iat[idx, col_idx])
+                    df_tbl.iat[idx, col_idx] = (
+                        f'{base} – <font color="blue"><a href="{url}">link</a></font>'
+                    )
+                    seg["df"] = df_tbl
 
     title = st.text_input("Proposal Title", os.path.splitext(uploaded.name)[0])
     if st.button("Generate PDF"):
