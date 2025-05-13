@@ -64,7 +64,17 @@ def transform_service_column(df):
 
 
 def replace_est(df):
-    df.columns = [c.replace("Est.", "Estimated").strip() for c in df.columns]
+    # unify variants of "Estimated Conversions" and "Estimated Impressions"
+    new_cols = []
+    for c in df.columns:
+        lc = c.lower()
+        if re.search(r'est(?:\.|\s)?\s*conversions?', lc) or 'estimated conversions' in lc:
+            new_cols.append("Estimated Conversions")
+        elif re.search(r'est(?:\.|\s)?\s*impressions?', lc) or 'estimated impressions' in lc:
+            new_cols.append("Estimated Impressions")
+        else:
+            new_cols.append(c.strip())
+    df.columns = new_cols
     return df.applymap(lambda v: v.replace("Est.", "Estimated") if isinstance(v, str) else v)
 
 
@@ -72,13 +82,13 @@ def split_tables(df):
     segments, start = [], 0
     for i, svc in enumerate(df["Service"]):
         if str(svc).strip().lower() == "total":
-            seg = df.iloc[start:i+1].reset_index(drop=True)
+            seg = df.iloc[start : i + 1].reset_index(drop=True)
             name = next(
                 (x for x in seg["Service"] if x and x.strip().lower() != "service"),
                 f"Table{len(segments)+1}"
             )
             segments.append({"name": name, "df": seg})
-            start = i+1
+            start = i + 1
     if start < len(df):
         seg = df.iloc[start:].reset_index(drop=True)
         name = next(
@@ -91,13 +101,20 @@ def split_tables(df):
 
 def calculate_and_insert_totals(seg_df):
     df = seg_df.copy()
-    mask = df["Service"].str.strip().str.lower() == "total"
-    orig = df.loc[mask].iloc[0] if mask.any() else None
-    drop_keys = {
-        "total", "est. conversions", "estimated conversions",
-        "est. impressions", "estimated impressions",
-    }
-    df = df.loc[~df["Service"].str.strip().str.lower().isin(drop_keys)].reset_index(drop=True)
+    # drop any "estimated conversions"/"est conversions" or impressions rows
+    drop_mask = df["Service"].fillna("").str.strip().str.lower().str.contains(
+        r'est(?:\.|\s)?\s*(conversions?|impressions?)'
+    )
+    df = df.loc[~drop_mask].reset_index(drop=True)
+
+    # find original total row if present
+    mask_total = df["Service"].str.strip().str.lower() == "total"
+    orig = df.loc[mask_total].iloc[0] if mask_total.any() else None
+
+    # remove any existing total rows
+    df = df.loc[~mask_total].reset_index(drop=True)
+
+    # build new total row
     total = {c: "" for c in df.columns}
     total["Service"] = "Total"
     if orig is not None:
@@ -105,6 +122,7 @@ def calculate_and_insert_totals(seg_df):
             v = orig.get(c)
             if pd.notna(v):
                 total[c] = v
+
     return pd.concat([df, pd.DataFrame([total])], ignore_index=True)
 
 
@@ -148,21 +166,20 @@ def make_pdf(segments, title, table_titles):
     colw = [doc.width*w for w in widths]
 
     for seg in segments:
-        # if user provided a custom title for this table, add it
+        # insert custom title above table if provided
         custom = table_titles.get(seg["name"], "").strip()
         if custom:
             elems.append(Paragraph(f"<b>{custom}</b>", styles["Heading3"]))
             elems.append(Spacer(1,6))
 
         df = seg["df"].fillna("").copy()
+        # drop blank Service rows
         df = df[df["Service"].str.strip().astype(bool)].reset_index(drop=True)
-
-        # drop repeated header row
-        mask_header = df["Service"].str.strip().str.lower() == "service"
+        # drop repeated header row if present
+        mask_hdr = df["Service"].str.strip().str.lower() == "service"
         if "Description" in df.columns:
-            desc = df["Description"].astype(str)
-            mask_header &= desc.str.strip().str.lower() == "description"
-        df = df.loc[~mask_header].reset_index(drop=True)
+            mask_hdr &= df["Description"].astype(str).str.strip().str.lower() == "description"
+        df = df.loc[~mask_hdr].reset_index(drop=True)
 
         df = calculate_and_insert_totals(df).fillna("")
 
@@ -175,11 +192,10 @@ def make_pdf(segments, title, table_titles):
         except:
             pass
 
-        # format dates & currency
+        # format
         for col in df.columns:
             if "date" in col.lower():
-                df[col] = pd.to_datetime(df[col], errors="coerce")\
-                             .dt.strftime("%m/%d/%Y").fillna("")
+                df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%m/%d/%Y").fillna("")
         for col in ("Monthly Amount","Item Total"):
             if col in df.columns:
                 df[col] = df[col].apply(fmt_money)
@@ -212,7 +228,7 @@ def make_pdf(segments, title, table_titles):
         elems.append(tbl)
         elems.append(Spacer(1,24))
 
-    # Grand Total row
+    # Grand Total row (Item Total only)
     grand_fmt = fmt_money(grand_total_item)
     cols = segments[0]["df"].columns
     row_cells=[]
@@ -253,7 +269,8 @@ def main():
     # Inline editing
     for seg in segments:
         df_seg = seg["df"].loc[
-            ~seg["df"]["Service"].str.strip().str.lower().eq("estimated conversions")
+            ~seg["df"]["Service"].fillna("").str.strip()
+               .str.lower().str.contains(r'est(?:\.|\s)?\s*conversions?')
         ].reset_index(drop=True)
 
         st.markdown(f"**Edit table: {seg['name']}**")
@@ -304,14 +321,18 @@ def main():
 
     # Apply hyperlinks
     for _, spec in link_specs.dropna(subset=["Table","Column","URL"]).iterrows():
-        tbl_name, col, idx, url = spec["Table"], spec["Column"], int(spec["Row"]), spec["URL"]
+        tbl_name, col, idx, url = (
+            spec["Table"], spec["Column"], int(spec["Row"]), spec["URL"]
+        )
         for seg in segments:
             if seg["name"] == tbl_name:
                 df_tbl = seg["df"].reset_index(drop=True)
                 if col in df_tbl.columns and 0 <= idx < len(df_tbl):
                     ci = df_tbl.columns.get_loc(col)
                     base = str(df_tbl.iat[idx,ci])
-                    df_tbl.iat[idx,ci] = f'{base} – <font color="blue"><a href="{url}">link</a></font>'
+                    df_tbl.iat[idx,ci] = (
+                        f'{base} – <font color="blue"><a href="{url}">link</a></font>'
+                    )
                     seg["df"] = df_tbl
 
     title = st.text_input("Proposal Title", os.path.splitext(uploaded.name)[0])
@@ -319,7 +340,12 @@ def main():
         for seg in segments:
             seg["df"] = calculate_and_insert_totals(seg["df"])
         pdf = make_pdf(segments, title, table_titles)
-        st.download_button("📥 Download PDF", data=pdf, file_name=f"{title}.pdf", mime="application/pdf")
+        st.download_button(
+            "📥 Download PDF",
+            data=pdf,
+            file_name=f"{title}.pdf",
+            mime="application/pdf"
+        )
 
 
 if __name__ == "__main__":
