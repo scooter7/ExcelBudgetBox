@@ -64,7 +64,6 @@ def transform_service_column(df):
 
 
 def replace_est(df):
-    # unify Est. → Estimated
     df.columns = [c.replace("Est.", "Estimated").strip() for c in df.columns]
     return df.applymap(lambda v: v.replace("Est.", "Estimated") if isinstance(v, str) else v)
 
@@ -109,7 +108,7 @@ def calculate_and_insert_totals(seg_df):
     return pd.concat([df, pd.DataFrame([total])], ignore_index=True)
 
 
-def make_pdf(segments, title):
+def make_pdf(segments, title, table_titles):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf,
@@ -149,21 +148,25 @@ def make_pdf(segments, title):
     colw = [doc.width*w for w in widths]
 
     for seg in segments:
-        df = seg["df"].fillna("").copy()
+        # if user provided a custom title for this table, add it
+        custom = table_titles.get(seg["name"], "").strip()
+        if custom:
+            elems.append(Paragraph(f"<b>{custom}</b>", styles["Heading3"]))
+            elems.append(Spacer(1,6))
 
-        # drop blank Service rows
+        df = seg["df"].fillna("").copy()
         df = df[df["Service"].str.strip().astype(bool)].reset_index(drop=True)
-        # drop repeated header row if present
+
+        # drop repeated header row
         mask_header = df["Service"].str.strip().str.lower() == "service"
         if "Description" in df.columns:
             desc = df["Description"].astype(str)
             mask_header &= desc.str.strip().str.lower() == "description"
         df = df.loc[~mask_header].reset_index(drop=True)
 
-        # recalc and append true Total
         df = calculate_and_insert_totals(df).fillna("")
 
-        # accumulate grand item total
+        # accumulate for grand total
         tot_row = df.loc[df["Service"]=="Total"].iloc[0]
         raw = tot_row.get("Item Total","")
         num = re.sub(r"[^\d.]", "", str(raw))
@@ -172,14 +175,11 @@ def make_pdf(segments, title):
         except:
             pass
 
-        # format dates
+        # format dates & currency
         for col in df.columns:
             if "date" in col.lower():
                 df[col] = pd.to_datetime(df[col], errors="coerce")\
-                             .dt.strftime("%m/%d/%Y")\
-                             .fillna("")
-
-        # format currency
+                             .dt.strftime("%m/%d/%Y").fillna("")
         for col in ("Monthly Amount","Item Total"):
             if col in df.columns:
                 df[col] = df[col].apply(fmt_money)
@@ -212,7 +212,7 @@ def make_pdf(segments, title):
         elems.append(tbl)
         elems.append(Spacer(1,24))
 
-    # Grand Total row (Item Total only)
+    # Grand Total row
     grand_fmt = fmt_money(grand_total_item)
     cols = segments[0]["df"].columns
     row_cells=[]
@@ -271,6 +271,14 @@ def main():
         )
         seg["df"] = edited.reset_index(drop=True)
 
+    # Table-specific Titles
+    table_titles = {}
+    for seg in segments:
+        table_titles[seg["name"]] = st.text_input(
+            f'Title above "{seg["name"]}" (leave blank for none):',
+            key=f"title_{seg['name']}"
+        )
+
     # Hyperlink specs
     table_names = [s["name"] for s in segments]
     all_columns = df.columns.tolist()
@@ -310,7 +318,7 @@ def main():
     if st.button("Generate PDF"):
         for seg in segments:
             seg["df"] = calculate_and_insert_totals(seg["df"])
-        pdf = make_pdf(segments, title)
+        pdf = make_pdf(segments, title, table_titles)
         st.download_button("📥 Download PDF", data=pdf, file_name=f"{title}.pdf", mime="application/pdf")
 
 
